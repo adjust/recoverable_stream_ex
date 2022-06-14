@@ -2,11 +2,11 @@ name: Elixir CI
 
 on: push
 
-jobs:           
+jobs:
   build:
 
     runs-on: ubuntu-latest
-    
+
     strategy:
       matrix:
        elixir_vsn: ["1.9-slim", "1.6-slim", "slim"]
@@ -14,11 +14,9 @@ jobs:
     services:
       database:
         image: postgres
-        env:
-          POSTGRES_PASSWORD:
-        ports: 
+        ports:
           - 5432:5432
-        
+
     container:
       image: elixir:${{matrix.elixir_vsn}}
       env:
