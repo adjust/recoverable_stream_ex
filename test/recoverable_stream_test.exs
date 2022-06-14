@@ -13,9 +13,17 @@ defmodule RecoverableStreamTest do
     end
   end
 
+  defp wrapper_ignore_errors(f) do
+    try do
+      f.(%{})
+    rescue
+      FunctionClauseError -> :ok
+    end
+  end
+
   test "normal wrapped stream" do
     n = 9
-    res = RS.run(gen_stream_f()) |> Stream.take(n)
+    res = gen_stream_f() |> RS.run() |> Stream.take(n)
     assert Enum.count(Enum.uniq(res)) == n
   end
 
@@ -41,8 +49,7 @@ defmodule RecoverableStreamTest do
 
     _res =
       RS.run(gen_stream)
-      |> Stream.take(n)
-      |> Enum.into([])
+      |> Enum.take(n)
 
     assert_receive {:down, ^ref, :normal}
   end
@@ -51,11 +58,11 @@ defmodule RecoverableStreamTest do
     n = 20
 
     res =
-      RS.run(gen_stream_f())
-      |> Stream.take(n)
-      |> Enum.into([])
+      gen_stream_f()
+      |> RS.run()
+      |> Enum.take(n)
 
-    assert Enum.into(1..n, []) == res
+    assert Enum.to_list(1..n) == res
   end
 
   test "number of retries" do
@@ -63,35 +70,57 @@ defmodule RecoverableStreamTest do
 
     assert {{:function_clause, _}, _} =
              catch_exit(
-               RS.run(gen_stream_f())
-               |> Stream.take(n)
-               |> Enum.into([])
+               gen_stream_f()
+               |> RS.run()
+               |> Enum.take(n)
              )
 
     res =
-      RS.run(gen_stream_f(), retry_attempts: 5)
-      |> Stream.take(n)
-      |> Enum.into([])
+      gen_stream_f()
+      |> RS.run(max_retries: 5)
+      |> Enum.take(n)
 
-    assert Enum.into(1..n, []) == res
+    assert Enum.to_list(1..n) == res
   end
 
   test "wrapper fun" do
     n = 20
 
-    wrapper = fn f ->
-      try do
-        f.(%{})
-      rescue
-        FunctionClauseError -> :ok
-      end
+    res =
+      gen_stream_f()
+      |> RS.run(wrapper_fun: &wrapper_ignore_errors/1, max_retries: 0)
+      |> Enum.take(n)
+
+    assert Enum.to_list(1..10) == res
+  end
+
+  test "timeout_fun for retried stream" do
+    n = 20
+    timeout = 200
+
+    pid = self()
+    ref = make_ref()
+
+    timeout_fun = fn attempt ->
+      send(pid, {ref, attempt})
+      timeout
     end
 
     res =
-      RS.run(gen_stream_f(), wrapper_fun: wrapper, retry_attempts: 0)
-      |> Stream.take(n)
-      |> Enum.into([])
+      gen_stream_f()
+      |> RS.run(timeout_fun: timeout_fun, max_retries: 5)
+      |> Stream.chunk_every(10)
+      |> Stream.each(fn [first | _] ->
+        # NOTE: since attempt is about "retries" first chunk (1..10) is effectively skipped,
+        # since it's normal flow (w/o retries)
+        if first > 1 do
+          attempt = div(first, 10)
+          assert_receive {^ref, ^attempt}, timeout
+        end
+      end)
+      |> Stream.flat_map(fn i -> i end)
+      |> Enum.take(n)
 
-    assert Enum.into(1..10, []) == res
+    assert Enum.to_list(1..n) == res
   end
 end

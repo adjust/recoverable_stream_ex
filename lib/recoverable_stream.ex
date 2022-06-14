@@ -27,19 +27,39 @@ defmodule RecoverableStream do
         [nil, nil]
 
     """
-    def child_spec(name),
-      do: Supervisor.Spec.supervisor(Task.Supervisor, [[name: name]], id: name)
+    def child_spec(name), do: Task.Supervisor.child_spec(name: name)
   end
 
-  defmodule RecoverableStreamCtx do
+  defp options_schema(),
+    do: [
+      task_supervisor: [
+        type: {:or, [:pid, :atom]},
+        default: TasksPool
+      ],
+      max_retries: [
+        type: :non_neg_integer,
+        default: 1
+      ],
+      wrapper_fun: [
+        type: {:fun, 1},
+        default: fn f -> f.(%{}) end
+      ],
+      timeout_fun: [
+        type: {:fun, 1}
+      ]
+    ]
+
+  defmodule Context do
     @moduledoc false
     defstruct [
       :task,
       :supervisor,
       :reply_ref,
-      :retries_left,
+      {:attempt, 1},
+      :max_retries,
       :stream_fun,
       :wrapper_fun,
+      :timeout_fun,
       last_value: nil
     ]
   end
@@ -55,7 +75,8 @@ defmodule RecoverableStream do
   @type wrapper_fun :: (inner_reduce_fun() -> none())
 
   @type run_option ::
-          {:retry_attempts, non_neg_integer()}
+          {:max_retries, non_neg_integer()}
+          | {:timeout_fun}
           | {:wrapper_fun, wrapper_fun()}
           | {:task_supervisor, atom() | pid()}
 
@@ -65,8 +86,8 @@ defmodule RecoverableStream do
   produced stream, forwarding data back to the caller.
 
   Returns a new `Stream` that gathers data forwarded by the `Task`.
-  Data is forwarded element by element. Batching is to be implemented
-  explicitly. For example `Postgrex.stream/3` sends data in chunks
+  Data is forwarded element by element. **Batching is to be implemented
+  explicitly**. For example `Postgrex.stream/3` sends data in chunks
   by default.
 
   ## Stream function
@@ -92,74 +113,77 @@ defmodule RecoverableStream do
 
   ## Options
 
-  - `:retry_attempts` (defaults to `1`) the total number of times
-    error recovery is performed before an error is propagated.
+  - `:max_retries` - the total number of times
+  error recovery is performed before an error is propagated (defaults to `1`).
 
     Retries counter is **not** reset upon a successful recovery!
 
-  - `:task_supervisor` either pid or a name of `Task.Supervisor`
-     to supervise a stream-reducer `Task`.
-     (defaults to `RecoverableStream.TaskPool`)
+  - `:timeout_fun` - function called with current retry attempt (number) and results in timeout taken
+    before next retry attempt is carried out (defaults to `nil`, i.e., no timeout)
 
-     See `RecoverableStream.TasksPool.child_spec/1` for details.
-
-  - `:wrapper_fun` is a function that wraps a stream reducer running
+  - `:wrapper_fun` -- is a function that wraps a stream reducer running
      inside a `Task` (defaults to `fun f -> f.(%{}) end`).
 
      Useful when the `t:stream_fun/0` must be run within a certain
      context. E.g. `Postgrex.stream/3` only works inside
      `Postgrex.transaction/3`.
 
+  - `:task_supervisor` - either pid or a name of `Task.Supervisor`
+     to supervise a stream-reducer `Task`.
+     (defaults to `RecoverableStream.TaskPool`)
+
+     See `RecoverableStream.TasksPool.child_spec/1` for details.
+
+
      See [Readme](./readme.html#a-practical-example)
      for a more elaborate example.
   """
-  def run(new_stream_fun, options \\ []) do
-    retries = Keyword.get(options, :retry_attempts, 1)
-    wfun = Keyword.get(options, :wrapper_fun, fn f -> f.(%{}) end)
-    supervisor = Keyword.get(options, :task_supervisor, TasksPool)
+  def run(stream_fun, options \\ [])
+      when is_function(stream_fun, 1) or is_function(stream_fun, 2) do
+    opts = NimbleOptions.validate!(options, options_schema())
 
+    context = %Context{
+      supervisor: opts[:task_supervisor],
+      max_retries: opts[:max_retries],
+      stream_fun: stream_fun,
+      wrapper_fun: opts[:wrapper_fun],
+      timeout_fun: opts[:timeout_fun]
+    }
+
+    # TODO: reimplement as proper Enumerable?
     Stream.resource(
-      fn -> start_fun(new_stream_fun, wfun, supervisor, retries, nil) end,
+      fn -> start_fun(context) end,
       &next_fun/1,
       &after_fun/1
     )
   end
 
-  defp start_fun(new_stream_fun, wrapper_fun, supervisor, retries, last_value)
-       when (is_function(new_stream_fun, 1) or is_function(new_stream_fun, 2)) and
-              is_integer(retries) and retries >= 0 do
+  ## Stream.resource functions
+  defp start_fun(%Context{stream_fun: stream_fun} = ctx) do
     owner = self()
     reply_ref = make_ref()
 
-    t =
-      Task.Supervisor.async_nolink(supervisor, fn ->
-        wrapper_fun.(fn stream_arg ->
-          if is_function(new_stream_fun, 1) do
-            new_stream_fun.(last_value)
-          else
-            new_stream_fun.(last_value, stream_arg)
+    task =
+      Task.Supervisor.async_nolink(ctx.supervisor, fn ->
+        ctx.wrapper_fun.(fn stream_arg ->
+          :erlang.fun_info(stream_fun)[:arity]
+          |> case do
+            1 -> stream_fun.(ctx.last_value)
+            2 -> stream_fun.(ctx.last_value, stream_arg)
           end
           |> stream_reducer(owner, reply_ref)
         end)
       end)
 
-    %RecoverableStreamCtx{
-      task: t,
-      supervisor: supervisor,
-      reply_ref: reply_ref,
-      retries_left: retries,
-      stream_fun: new_stream_fun,
-      wrapper_fun: wrapper_fun,
-      last_value: last_value
-    }
+    %Context{ctx | task: task, reply_ref: reply_ref}
   end
 
   defp next_fun(ctx) do
     %{
       task: %Task{ref: tref, pid: tpid},
-      supervisor: sup,
       reply_ref: rref,
-      retries_left: retries
+      attempt: attempt,
+      max_retries: max_retries
     } = ctx
 
     send(tpid, {:ready, rref})
@@ -170,20 +194,19 @@ defmodule RecoverableStream do
         {:halt, ctx}
 
       # TODO add an optional retries reset
-      {:data, ^rref, x} ->
-        {[x], %{ctx | last_value: x}}
+      {:data, ^rref, el} ->
+        {[el], %{ctx | last_value: el}}
 
       {:DOWN, ^tref, _, _, :normal} ->
         {:halt, ctx}
 
-      {:DOWN, ^tref, _, _, reason} when retries < 1 ->
+      {:DOWN, ^tref, _, _, reason} when attempt > max_retries ->
         exit({reason, {__MODULE__, :next_fun, ctx}})
 
-      {:DOWN, ^tref, _, _, _reason} ->
-        {[], start_fun(ctx.stream_fun, ctx.wrapper_fun, sup, retries - 1, ctx.last_value)}
+      {:DOWN, ^tref, _, _, reason} ->
+        apply_timeout(ctx)
+        {[], start_fun(%Context{ctx | attempt: attempt + 1})}
     end
-
-    # TODO consider adding a timeout
   end
 
   defp after_fun(%{task: %Task{ref: tref, pid: tpid}, reply_ref: rref} = ctx) do
@@ -202,26 +225,43 @@ defmodule RecoverableStream do
     end
   end
 
+  defp apply_timeout(%Context{timeout_fun: nil}), do: :ok
+
+  defp apply_timeout(%Context{timeout_fun: fun, attempt: attempt})
+       when is_function(fun, 1) do
+    case fun.(attempt) do
+      non_pos when is_integer(non_pos) and non_pos <= 0 ->
+        :ok
+
+      i when is_integer(i) and i > 0 ->
+        :timer.sleep(i)
+
+      other ->
+        raise ArgumentError, message: "invalid retry timeout value: #{inspect(other)}"
+    end
+  end
+
   defp stream_reducer(stream, owner, reply_ref) do
     mon_ref = Process.monitor(owner)
 
-    stream
-    |> Stream.each(fn x ->
-      receive do
-        {:done, ^reply_ref} ->
-          exit(:normal)
-
-        {:ready, ^reply_ref} ->
-          send(owner, {:data, reply_ref, x})
-
-        {:DOWN, ^mon_ref, _, ^owner, reason} ->
-          exit(reason)
-      end
-
-      # TODO consider adding a timeout
+    # TODO consider adding a timeout for sending elements
+    Enum.each(stream, fn el ->
+      send_data(owner, mon_ref, reply_ref, el)
     end)
-    |> Stream.run()
 
     {:done, reply_ref}
+  end
+
+  defp send_data(pid, mon_ref, reply_ref, data) do
+    receive do
+      {:done, ^reply_ref} ->
+        exit(:normal)
+
+      {:ready, ^reply_ref} ->
+        send(pid, {:data, reply_ref, data})
+
+      {:DOWN, ^mon_ref, _, ^pid, reason} ->
+        exit(reason)
+    end
   end
 end

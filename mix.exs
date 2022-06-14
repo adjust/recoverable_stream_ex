@@ -45,6 +45,7 @@ defmodule RecoverableStreamEx.MixProject do
 
   defp deps do
     [
+      {:nimble_options, "~> 0.3.0"},
       {:postgrex, "~> 0.15", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.21", only: :dev, runtime: false}
     ]

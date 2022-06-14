@@ -6,14 +6,16 @@ defmodule PostgresTest do
 
   setup_all do
     pg_hostname = System.get_env("PG_HOST") || "localhost"
+    pg_port = System.get_env("PG_PORT") || 5432
     pg_username = System.get_env("PG_USER") || "postgres"
-    pg_password = System.get_env("PG_PASS") || ""
+    pg_password = System.get_env("PG_PASS") || "postgres"
     {:ok, _} = Application.ensure_all_started(:postgrex)
 
     {:ok, pid} =
       Postgrex.start_link(
         database: "postgres",
         hostname: pg_hostname,
+        port: pg_port,
         username: pg_username,
         password: pg_password
       )
