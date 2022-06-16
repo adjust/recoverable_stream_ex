@@ -27,7 +27,11 @@ defmodule RecoverableStream do
         [nil, nil]
 
     """
-    def child_spec(name), do: Task.Supervisor.child_spec(name: name)
+    def child_spec(name) do
+      [name: name]
+      |> Task.Supervisor.child_spec()
+      |> Map.put(:id, name)
+    end
   end
 
   defp options_schema(),
@@ -203,7 +207,7 @@ defmodule RecoverableStream do
       {:DOWN, ^tref, _, _, reason} when attempt > max_retries ->
         exit({reason, {__MODULE__, :next_fun, ctx}})
 
-      {:DOWN, ^tref, _, _, reason} ->
+      {:DOWN, ^tref, _, _, _reason} ->
         apply_timeout(ctx)
         {[], start_fun(%Context{ctx | attempt: attempt + 1})}
     end
