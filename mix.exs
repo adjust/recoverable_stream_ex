@@ -5,7 +5,7 @@ defmodule RecoverableStreamEx.MixProject do
     [
       app: :recoverable_stream_ex,
       version: "1.0.0",
-      elixir: "~> 1.6",
+      elixir: "~> 1.9",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
 
