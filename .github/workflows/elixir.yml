@@ -9,7 +9,7 @@ jobs:
 
     strategy:
       matrix:
-       elixir_vsn: ["1.9-slim", "1.6-slim", "slim"]
+       elixir_vsn: ["1.9-slim", "slim"]
 
     services:
       database:

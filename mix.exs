@@ -5,7 +5,7 @@ defmodule RecoverableStreamEx.MixProject do
     [
       app: :recoverable_stream_ex,
       version: "1.0.0",
-      elixir: "~> 1.6",
+      elixir: "~> 1.9",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
 
@@ -45,8 +45,8 @@ defmodule RecoverableStreamEx.MixProject do
 
   defp deps do
     [
-      {:nimble_options, "~> 0.3.0"},
-      {:postgrex, "~> 0.15", only: [:dev, :test], runtime: false},
+      {:nimble_options, "~> 0.3"},
+      {:postgrex, "~> 0.15.0", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.21", only: :dev, runtime: false}
     ]
   end
