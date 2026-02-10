@@ -5,11 +5,10 @@ defmodule RecoverableStreamEx.MixProject do
     [
       app: :recoverable_stream_ex,
       version: "1.0.0",
-      elixir: "~> 1.9",
+      elixir: "~> #{elixir_version()}",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
-
-      # Hex & Docs
+      aliases: aliases(),
       description: description(),
       package: package(),
       name: "RecoverableStreamEx",
@@ -17,6 +16,9 @@ defmodule RecoverableStreamEx.MixProject do
       docs: [
         main: "readme",
         extras: ["README.md"]
+      ],
+      preferred_cli_env: [
+        check: :test
       ]
     ]
   end
@@ -45,9 +47,29 @@ defmodule RecoverableStreamEx.MixProject do
 
   defp deps do
     [
-      {:nimble_options, "~> 0.3"},
+      {:nimble_options, "~> 1.0"},
       {:postgrex, "~> 0.15.0", only: [:dev, :test], runtime: false},
-      {:ex_doc, "~> 0.21", only: :dev, runtime: false}
+      {:ex_doc, "~> 0.21", only: :dev, runtime: false},
+      {:excoveralls, "~> 0.18.5", only: [:test]}
     ]
+  end
+
+  defp aliases do
+    [
+      check: [
+        "compile --warnings-as-errors",
+        "format --check-formatted",
+        "test --warnings-as-errors"
+      ]
+    ]
+  end
+
+  defp elixir_version do
+    ".tool-versions"
+    |> File.read!()
+    |> String.split("\n")
+    |> Enum.find(&String.starts_with?(&1, "elixir"))
+    |> String.split()
+    |> Enum.at(1)
   end
 end
