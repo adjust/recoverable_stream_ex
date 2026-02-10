@@ -4,12 +4,11 @@ on: push
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
     strategy:
       matrix:
-       elixir_vsn: ["1.9-slim", "slim"]
+       elixir_vsn: ["slim"]
 
     services:
       database:
