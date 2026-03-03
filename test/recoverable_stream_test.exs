@@ -123,4 +123,145 @@ defmodule RecoverableStreamTest do
 
     assert Enum.to_list(1..n) == res
   end
+
+  describe "last_exit_reason argument" do
+    test "3-arity stream_fun receives nil on first invocation" do
+      pid = self()
+      ref = make_ref()
+
+      stream_fun = fn last_value, _stream_arg, last_exit_reason ->
+        send(pid, {ref, :invoked, last_value, last_exit_reason})
+        Stream.iterate(1, &(&1 + 1))
+      end
+
+      RS.run(stream_fun)
+      |> Enum.take(3)
+
+      assert_receive {^ref, :invoked, nil, nil}
+    end
+
+    test "3-arity stream_fun receives exit reason on retry" do
+      pid = self()
+      ref = make_ref()
+
+      stream_fun = fn last_value, _stream_arg, last_exit_reason ->
+        send(pid, {ref, :invoked, last_value, last_exit_reason})
+
+        case last_value do
+          nil ->
+            # First invocation: emit values then crash
+            Stream.iterate(1, fn
+              x when x < 3 -> x + 1
+              _ -> raise "intentional crash"
+            end)
+
+          _ ->
+            # After recovery: continue normally
+            Stream.iterate(last_value + 1, &(&1 + 1))
+        end
+      end
+
+      res =
+        RS.run(stream_fun, max_retries: 1)
+        |> Enum.take(5)
+
+      assert res == [1, 2, 3, 4, 5]
+
+      # First invocation: nil exit reason
+      assert_receive {^ref, :invoked, nil, nil}
+
+      # Second invocation after crash: should have exit reason
+      assert_receive {^ref, :invoked, 3,
+                      {%RuntimeError{message: "intentional crash"}, _stacktrace}}
+    end
+
+    test "3-arity stream_fun receives different exit reasons on multiple retries" do
+      pid = self()
+      ref = make_ref()
+
+      stream_fun = fn last_value, _stream_arg, last_exit_reason ->
+        send(pid, {ref, :invoked, last_value, last_exit_reason})
+
+        case last_value do
+          nil ->
+            Stream.iterate(1, fn
+              x when x < 2 -> x + 1
+              _ -> raise "first crash"
+            end)
+
+          2 ->
+            Stream.iterate(3, fn
+              x when x < 4 -> x + 1
+              _ -> raise "second crash"
+            end)
+
+          _ ->
+            Stream.iterate(last_value + 1, &(&1 + 1))
+        end
+      end
+
+      res =
+        RS.run(stream_fun, max_retries: 2)
+        |> Enum.take(6)
+
+      assert res == [1, 2, 3, 4, 5, 6]
+
+      # First invocation
+      assert_receive {^ref, :invoked, nil, nil}
+
+      # Second invocation - should have first crash reason
+      assert_receive {^ref, :invoked, 2, {%RuntimeError{message: "first crash"}, _}}
+
+      # Third invocation - should have second crash reason
+      assert_receive {^ref, :invoked, 4, {%RuntimeError{message: "second crash"}, _}}
+    end
+
+    test "2-arity stream_fun still works (backward compatibility)" do
+      pid = self()
+      ref = make_ref()
+
+      stream_fun = fn last_value, _stream_arg ->
+        send(pid, {ref, :invoked, last_value})
+
+        case last_value do
+          nil ->
+            Stream.iterate(1, fn
+              x when x < 3 -> x + 1
+              _ -> raise "crash"
+            end)
+
+          _ ->
+            Stream.iterate(last_value + 1, &(&1 + 1))
+        end
+      end
+
+      res =
+        RS.run(stream_fun, max_retries: 1)
+        |> Enum.take(5)
+
+      assert res == [1, 2, 3, 4, 5]
+
+      assert_receive {^ref, :invoked, nil}
+      assert_receive {^ref, :invoked, 3}
+    end
+
+    test "1-arity stream_fun still works (backward compatibility)" do
+      stream_fun = fn
+        nil ->
+          Stream.iterate(1, fn
+            x when x < 3 -> x + 1
+            _ -> raise "crash"
+          end)
+
+        last_value ->
+          Stream.iterate(last_value + 1, &(&1 + 1))
+      end
+
+      res =
+        RS.run(stream_fun, max_retries: 1)
+        |> Enum.take(5)
+
+      assert res == [1, 2, 3, 4, 5]
+    end
+  end
 end
