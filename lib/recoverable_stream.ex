@@ -65,7 +65,7 @@ defmodule RecoverableStream do
       :wrapper_fun,
       :timeout_fun,
       last_value: nil,
-      last_exit_reason: nil
+      exit_reasons: []
     ]
   end
 
@@ -75,7 +75,7 @@ defmodule RecoverableStream do
   @type stream_fun ::
           (last_value_t() -> Enumerable.t())
           | (last_value_t(), stream_arg_t() -> Enumerable.t())
-          | (last_value_t(), stream_arg_t(), last_exit_reason :: any() -> Enumerable.t())
+          | (last_value_t(), stream_arg_t(), exit_reasons :: [any()] -> Enumerable.t())
 
   @type inner_reduce_fun :: (stream_arg_t() -> none())
   @type wrapper_fun :: (inner_reduce_fun() -> none())
@@ -176,7 +176,7 @@ defmodule RecoverableStream do
           |> case do
             1 -> stream_fun.(ctx.last_value)
             2 -> stream_fun.(ctx.last_value, stream_arg)
-            3 -> stream_fun.(ctx.last_value, stream_arg, ctx.last_exit_reason)
+            3 -> stream_fun.(ctx.last_value, stream_arg, ctx.exit_reasons)
           end
           |> stream_reducer(owner, reply_ref)
         end)
@@ -212,7 +212,7 @@ defmodule RecoverableStream do
 
       {:DOWN, ^tref, :process, _task_pid, reason} ->
         apply_timeout(ctx)
-        {[], start_fun(%Context{ctx | attempt: attempt + 1, last_exit_reason: reason})}
+        {[], start_fun(%Context{ctx | attempt: attempt + 1, exit_reasons: [reason | ctx.exit_reasons]})}
     end
   end
 

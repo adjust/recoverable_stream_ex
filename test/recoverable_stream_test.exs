@@ -137,7 +137,7 @@ defmodule RecoverableStreamTest do
       RS.run(stream_fun)
       |> Enum.take(3)
 
-      assert_receive {^ref, :invoked, nil, nil}
+      assert_receive {^ref, :invoked, nil, []}
     end
 
     test "3-arity stream_fun receives exit reason on retry" do
@@ -167,12 +167,12 @@ defmodule RecoverableStreamTest do
 
       assert res == [1, 2, 3, 4, 5]
 
-      # First invocation: nil exit reason
-      assert_receive {^ref, :invoked, nil, nil}
+      # First invocation: empty exit reasons list
+      assert_receive {^ref, :invoked, nil, []}
 
-      # Second invocation after crash: should have exit reason
+      # Second invocation after crash: should have exit reason in list
       assert_receive {^ref, :invoked, 3,
-                      {%RuntimeError{message: "intentional crash"}, _stacktrace}}
+                      [{%RuntimeError{message: "intentional crash"}, _stacktrace}]}
     end
 
     test "3-arity stream_fun receives different exit reasons on multiple retries" do
@@ -207,13 +207,15 @@ defmodule RecoverableStreamTest do
       assert res == [1, 2, 3, 4, 5, 6]
 
       # First invocation
-      assert_receive {^ref, :invoked, nil, nil}
+      assert_receive {^ref, :invoked, nil, []}
 
-      # Second invocation - should have first crash reason
-      assert_receive {^ref, :invoked, 2, {%RuntimeError{message: "first crash"}, _}}
+      # Second invocation - should have first crash reason in list
+      assert_receive {^ref, :invoked, 2, [{%RuntimeError{message: "first crash"}, _}]}
 
-      # Third invocation - should have second crash reason
-      assert_receive {^ref, :invoked, 4, {%RuntimeError{message: "second crash"}, _}}
+      # Third invocation - should have accumulated exit reasons (second crash, then first crash)
+      assert_receive {^ref, :invoked, 4,
+                      [{%RuntimeError{message: "second crash"}, _},
+                       {%RuntimeError{message: "first crash"}, _}]}
     end
 
     test "2-arity stream_fun still works (backward compatibility)" do
