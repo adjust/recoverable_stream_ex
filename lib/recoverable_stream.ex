@@ -69,20 +69,73 @@ defmodule RecoverableStream do
     ]
   end
 
+  @typedoc """
+  The last value emitted by the stream before the current invocation.
+
+  `nil` is passed on the first invocation.
+  """
   @type last_value_t :: nil | any()
+
+  @typedoc """
+  Arbitrary metadata passed from `t:wrapper_fun/0` into `t:stream_fun/0`.
+  """
   @type stream_arg_t :: any()
 
+  @typedoc """
+  A function that recreates the upstream stream.
+
+  Supported arities:
+
+  - `1`: receives `t:last_value_t/0`
+  - `2`: receives `t:last_value_t/0` and `t:stream_arg_t/0`
+  - `3`: receives `t:last_value_t/0`, `t:stream_arg_t/0`, and accumulated exit reasons
+  """
   @type stream_fun ::
           (last_value_t() -> Enumerable.t())
           | (last_value_t(), stream_arg_t() -> Enumerable.t())
           | (last_value_t(), stream_arg_t(), exit_reasons :: [any()] -> Enumerable.t())
 
-  @type inner_reduce_fun :: (stream_arg_t() -> none())
-  @type wrapper_fun :: (inner_reduce_fun() -> none())
+  @typedoc """
+  Reducer function executed inside the worker task.
 
+  `t:wrapper_fun/0` calls this function with the metadata that should be forwarded
+  to `t:stream_fun/0`.
+  """
+  @type inner_reduce_fun :: (stream_arg_t() -> any())
+
+  @typedoc """
+  A function that wraps execution of the stream reducer inside the worker task.
+
+  The wrapper may establish surrounding context, such as a database transaction,
+  and passes any metadata needed by `t:stream_fun/0` into the reducer function.
+  """
+  @type wrapper_fun :: (inner_reduce_fun() -> any())
+
+  @typedoc """
+  Milliseconds to wait before the next retry attempt.
+
+  A non-positive integer skips sleeping.
+  """
+  @type retry_timeout_t :: integer()
+
+  @typedoc """
+  A function that determines how long to wait before retrying after a failure.
+
+  Supported arities:
+
+  - `1`: receives the number of the current retry attempt
+  - `2`: receives the number of the current retry attempt and the exit reason from the failed task
+  """
+  @type timeout_fun ::
+          (attempt :: pos_integer() -> retry_timeout_t())
+          | (attempt :: pos_integer(), reason :: any() -> retry_timeout_t())
+
+  @typedoc """
+  Options accepted by `run/2`.
+  """
   @type run_option ::
           {:max_retries, non_neg_integer()}
-          | {:timeout_fun}
+          | {:timeout_fun, timeout_fun()}
           | {:wrapper_fun, wrapper_fun()}
           | {:task_supervisor, atom() | pid()}
 
@@ -98,11 +151,13 @@ defmodule RecoverableStream do
 
   ## Stream function
 
-  `t:stream_fun/0` must be a function that accepts one or two arguments.
+  `t:stream_fun/0` must be a function that accepts one, two, or three arguments.
 
   - The first argument is either `nil` or the last value received from a
-  stream before recovery.
-  - The second argument is an arbitrary term passed from `t:wrapper_fun/0`
+    stream before recovery.
+  - The second argument is an arbitrary term passed from `t:wrapper_fun/0`.
+  - The third argument is a list of exit reasons collected from previous failed
+    attempts, ordered from most recent to oldest.
 
   The function should return a `Stream` (although, any `Enumerable` could work).
 
@@ -124,15 +179,26 @@ defmodule RecoverableStream do
 
     Retries counter is **not** reset upon a successful recovery!
 
-  - `:timeout_fun` - function called with current retry attempt (number) and results in timeout taken
-    before next retry attempt is carried out (defaults to `nil`, i.e., no timeout)
+  - `:timeout_fun` - function called before a retry attempt.
+
+    Supported arities:
+
+    - `1`: receives the number of the current retry attempt number
+    - `2`: receives the number of the current retry attempt number and the exit reason from
+      the failed task
+
+    The function must return an integer timeout in milliseconds. Positive
+    values are slept, while non-positive values skip sleeping.
+    Defaults to `nil`, i.e. no timeout.
 
   - `:wrapper_fun` -- is a function that wraps a stream reducer running
-     inside a `Task` (defaults to `fun f -> f.(%{}) end`).
+     inside a `Task` (defaults to `fn f -> f.(%{}) end`).
 
      Useful when the `t:stream_fun/0` must be run within a certain
      context. E.g. `Postgrex.stream/3` only works inside
-     `Postgrex.transaction/3`.
+     `Postgrex.transaction/3`. The wrapper calls the reducer with the
+     metadata value that should become the second argument of a `2`- or
+     `3`-arity `t:stream_fun/0`.
 
   - `:task_supervisor` - either pid or a name of `Task.Supervisor`
      to supervise a stream-reducer `Task`.
