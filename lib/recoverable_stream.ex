@@ -49,7 +49,7 @@ defmodule RecoverableStream do
         default: fn f -> f.(%{}) end
       ],
       timeout_fun: [
-        type: {:fun, 1}
+        type: {:or, [{:fun, 1}, {:fun, 2}]}
       ]
     ]
 
@@ -211,8 +211,14 @@ defmodule RecoverableStream do
         exit({reason, {__MODULE__, :next_fun, ctx}})
 
       {:DOWN, ^tref, :process, _task_pid, reason} ->
-        apply_timeout(ctx)
-        {[], start_fun(%Context{ctx | attempt: attempt + 1, exit_reasons: [reason | ctx.exit_reasons]})}
+        apply_timeout(ctx, reason)
+
+        {[],
+         start_fun(%Context{
+           ctx
+           | attempt: attempt + 1,
+             exit_reasons: [reason | ctx.exit_reasons]
+         })}
     end
   end
 
@@ -232,11 +238,17 @@ defmodule RecoverableStream do
     end
   end
 
-  defp apply_timeout(%Context{timeout_fun: nil}), do: :ok
+  defp apply_timeout(%Context{timeout_fun: nil}, _reason), do: :ok
 
-  defp apply_timeout(%Context{timeout_fun: fun, attempt: attempt})
-       when is_function(fun, 1) do
-    case fun.(attempt) do
+  defp apply_timeout(%Context{timeout_fun: fun, attempt: attempt}, reason)
+       when is_function(fun, 1) or is_function(fun, 2) do
+    result =
+      case :erlang.fun_info(fun)[:arity] do
+        1 -> fun.(attempt)
+        2 -> fun.(attempt, reason)
+      end
+
+    case result do
       non_pos when is_integer(non_pos) and non_pos <= 0 ->
         :ok
 
