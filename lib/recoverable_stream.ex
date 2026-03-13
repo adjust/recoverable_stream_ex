@@ -64,7 +64,8 @@ defmodule RecoverableStream do
       :stream_fun,
       :wrapper_fun,
       :timeout_fun,
-      last_value: nil
+      last_value: nil,
+      exit_reasons: []
     ]
   end
 
@@ -74,6 +75,7 @@ defmodule RecoverableStream do
   @type stream_fun ::
           (last_value_t() -> Enumerable.t())
           | (last_value_t(), stream_arg_t() -> Enumerable.t())
+          | (last_value_t(), stream_arg_t(), exit_reasons :: [any()] -> Enumerable.t())
 
   @type inner_reduce_fun :: (stream_arg_t() -> none())
   @type wrapper_fun :: (inner_reduce_fun() -> none())
@@ -143,7 +145,7 @@ defmodule RecoverableStream do
      for a more elaborate example.
   """
   def run(stream_fun, options \\ [])
-      when is_function(stream_fun, 1) or is_function(stream_fun, 2) do
+      when is_function(stream_fun, 1) or is_function(stream_fun, 2) or is_function(stream_fun, 3) do
     opts = NimbleOptions.validate!(options, options_schema())
 
     context = %Context{
@@ -174,6 +176,7 @@ defmodule RecoverableStream do
           |> case do
             1 -> stream_fun.(ctx.last_value)
             2 -> stream_fun.(ctx.last_value, stream_arg)
+            3 -> stream_fun.(ctx.last_value, stream_arg, ctx.exit_reasons)
           end
           |> stream_reducer(owner, reply_ref)
         end)
@@ -201,15 +204,15 @@ defmodule RecoverableStream do
       {:data, ^rref, el} ->
         {[el], %{ctx | last_value: el}}
 
-      {:DOWN, ^tref, _, _, :normal} ->
+      {:DOWN, ^tref, :process, _task_pid, :normal} ->
         {:halt, ctx}
 
-      {:DOWN, ^tref, _, _, reason} when attempt > max_retries ->
+      {:DOWN, ^tref, :process, _task_pid, reason} when attempt > max_retries ->
         exit({reason, {__MODULE__, :next_fun, ctx}})
 
-      {:DOWN, ^tref, _, _, _reason} ->
+      {:DOWN, ^tref, :process, _task_pid, reason} ->
         apply_timeout(ctx)
-        {[], start_fun(%Context{ctx | attempt: attempt + 1})}
+        {[], start_fun(%Context{ctx | attempt: attempt + 1, exit_reasons: [reason | ctx.exit_reasons]})}
     end
   end
 
