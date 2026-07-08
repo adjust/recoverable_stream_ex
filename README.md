@@ -63,3 +63,23 @@ pass additional metadata to the stream creation function.
     RecoverableStream.run(gen_stream, wrapper_fun: wrapper_fun)
     |> Stream.each(&IO.inspect/1)
     |> Stream.run
+
+## Process dictionary passing
+
+By default, `RecoverableStream.run/2` copies only process dictionary entries
+used for Ecto SQL checkouts into the task that evaluates the source stream.
+This is equivalent to:
+
+```elixir
+pass_proc_dict: fn {key, _value} -> match?({Ecto.Adapters.SQL, _}, key) end
+```
+
+The `:pass_proc_dict` option accepts:
+
+- `:db_checkouts` - copy only Ecto SQL checkout entries. This is the default.
+- `:missing` - copy only entries whose keys are missing in the task process.
+  This is useful when the process dictionary also stores process-specific
+  settings that should not be overwritten.
+- `nil` - disable process dictionary copying.
+- `fun/1` - copy entries selected by a custom filter function. The function
+  receives `{key, value}`.

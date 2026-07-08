@@ -124,6 +124,89 @@ defmodule RecoverableStreamTest do
     assert Enum.to_list(1..n) == res
   end
 
+  describe "pass_proc_dict option" do
+    test "defaults to passing only Ecto SQL checkout entries" do
+      ref = make_ref()
+      db_key = {Ecto.Adapters.SQL, ref}
+      other_key = {__MODULE__, ref}
+      db_value = make_ref()
+      other_value = make_ref()
+
+      Process.put(db_key, db_value)
+      Process.put(other_key, other_value)
+
+      assert [[^db_value, nil]] =
+               process_dict_values_stream([db_key, other_key])
+               |> RS.run()
+               |> Enum.to_list()
+    end
+
+    test "nil disable process dictionary passing" do
+      ref = make_ref()
+      key = {__MODULE__, ref}
+      value = make_ref()
+
+      Process.put(key, value)
+
+      assert [[nil]] =
+               process_dict_values_stream([key])
+               |> RS.run(pass_proc_dict: nil)
+               |> Enum.to_list()
+    end
+
+    test ":missing passes only entries missing in the child task" do
+      ref = make_ref()
+      missing_key = {__MODULE__, ref}
+      child_key = :"$initial_call"
+      copied_value = make_ref()
+      parent_child_key_value = {__MODULE__, ref, make_ref()}
+      missing = make_ref()
+      previous_child_key_value = Process.get(child_key, missing)
+
+      Process.put(missing_key, copied_value)
+      Process.put(child_key, parent_child_key_value)
+
+      try do
+        assert [[^copied_value, child_key_value]] =
+                 process_dict_values_stream([missing_key, child_key])
+                 |> RS.run(pass_proc_dict: :missing)
+                 |> Enum.to_list()
+
+        refute child_key_value == parent_child_key_value
+        refute is_nil(child_key_value)
+      after
+        Process.delete(missing_key)
+
+        if previous_child_key_value == missing do
+          Process.delete(child_key)
+        else
+          Process.put(child_key, previous_child_key_value)
+        end
+      end
+    end
+
+    test "fun/1 passes entries selected by a custom filter" do
+      ref = make_ref()
+      allowed_key = {:allowed, ref}
+      blocked_key = {:blocked, ref}
+      allowed_value = make_ref()
+      blocked_value = make_ref()
+
+      Process.put(allowed_key, allowed_value)
+      Process.put(blocked_key, blocked_value)
+
+      filter_fun = fn
+        {^allowed_key, _value} -> true
+        _entry -> false
+      end
+
+      assert [[^allowed_value, nil]] =
+               process_dict_values_stream([allowed_key, blocked_key])
+               |> RS.run(pass_proc_dict: filter_fun)
+               |> Enum.to_list()
+    end
+  end
+
   describe "last_exit_reason argument" do
     test "3-arity stream_fun receives nil on first invocation" do
       pid = self()
@@ -214,8 +297,10 @@ defmodule RecoverableStreamTest do
 
       # Third invocation - should have accumulated exit reasons (second crash, then first crash)
       assert_receive {^ref, :invoked, 4,
-                      [{%RuntimeError{message: "second crash"}, _},
-                       {%RuntimeError{message: "first crash"}, _}]}
+                      [
+                        {%RuntimeError{message: "second crash"}, _},
+                        {%RuntimeError{message: "first crash"}, _}
+                      ]}
     end
 
     test "2-arity stream_fun still works (backward compatibility)" do
@@ -264,6 +349,12 @@ defmodule RecoverableStreamTest do
         |> Enum.take(5)
 
       assert res == [1, 2, 3, 4, 5]
+    end
+  end
+
+  defp process_dict_values_stream(keys) do
+    fn _last_value ->
+      [Enum.map(keys, &Process.get/1)]
     end
   end
 end
