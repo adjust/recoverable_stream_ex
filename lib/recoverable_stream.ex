@@ -50,6 +50,10 @@ defmodule RecoverableStream do
       ],
       timeout_fun: [
         type: {:fun, 1}
+      ],
+      pass_proc_dict: [
+        type: {:or, [{:in, [:missing, :db_checkouts]}, nil, {:fun, 1}]},
+        default: :db_checkouts
       ]
     ]
 
@@ -64,6 +68,7 @@ defmodule RecoverableStream do
       :stream_fun,
       :wrapper_fun,
       :timeout_fun,
+      :pass_proc_dict,
       last_value: nil,
       exit_reasons: []
     ]
@@ -79,11 +84,19 @@ defmodule RecoverableStream do
 
   @type inner_reduce_fun :: (stream_arg_t() -> none())
   @type wrapper_fun :: (inner_reduce_fun() -> none())
+  @type pass_proc_dict_filter :: ({any(), any()} -> as_boolean(term()))
+
+  @type pass_proc_dict ::
+          nil
+          | :missing
+          | :db_checkouts
+          | pass_proc_dict_filter()
 
   @type run_option ::
           {:max_retries, non_neg_integer()}
           | {:timeout_fun}
           | {:wrapper_fun, wrapper_fun()}
+          | {:pass_proc_dict, pass_proc_dict()}
           | {:task_supervisor, atom() | pid()}
 
   @spec run(stream_fun(), [run_option()]) :: Enumerable.t()
@@ -127,6 +140,21 @@ defmodule RecoverableStream do
   - `:timeout_fun` - function called with current retry attempt (number) and results in timeout taken
     before next retry attempt is carried out (defaults to `nil`, i.e., no timeout)
 
+  - `:pass_proc_dict` - controls which entries from the caller's process
+    dictionary are copied into the stream-reducer `Task` before it runs
+    `:wrapper_fun` and queries the source stream.
+
+    Accepts:
+
+    - `:db_checkouts` - copy only DB checkout entries whose keys match
+      `{Ecto.Adapters.SQL, _}` (default to pass Ecto transactions/checkouts).
+    - `:missing` - copy only entries whose keys are not already present in
+      the task process dictionary. This is useful when the process dictionary
+      stores other process-specific settings that must not be overwritten.
+    - `nil` - disable process dictionary copying.
+    - `fun/1` - copy entries for which the function returns a truthy value.
+      The function receives `{key, value}`.
+
   - `:wrapper_fun` -- is a function that wraps a stream reducer running
      inside a `Task` (defaults to `fun f -> f.(%{}) end`).
 
@@ -153,7 +181,8 @@ defmodule RecoverableStream do
       max_retries: opts[:max_retries],
       stream_fun: stream_fun,
       wrapper_fun: opts[:wrapper_fun],
-      timeout_fun: opts[:timeout_fun]
+      timeout_fun: opts[:timeout_fun],
+      pass_proc_dict: opts[:pass_proc_dict]
     }
 
     # TODO: reimplement as proper Enumerable?
@@ -168,9 +197,12 @@ defmodule RecoverableStream do
   defp start_fun(%Context{stream_fun: stream_fun} = ctx) do
     owner = self()
     reply_ref = make_ref()
+    proc_dict = Process.get()
 
     task =
       Task.Supervisor.async_nolink(ctx.supervisor, fn ->
+        apply_proc_dict(proc_dict, ctx.pass_proc_dict)
+
         ctx.wrapper_fun.(fn stream_arg ->
           :erlang.fun_info(stream_fun)[:arity]
           |> case do
@@ -184,6 +216,32 @@ defmodule RecoverableStream do
 
     %Context{ctx | task: task, reply_ref: reply_ref}
   end
+
+  defp apply_proc_dict(_proc_dict, nil), do: :ok
+
+  defp apply_proc_dict(proc_dict, :missing) do
+    missing = make_ref()
+
+    Enum.each(proc_dict, fn {key, value} ->
+      case Process.get(key, missing) do
+        ^missing -> Process.put(key, value)
+        _value -> :ok
+      end
+    end)
+  end
+
+  defp apply_proc_dict(proc_dict, :db_checkouts) do
+    apply_proc_dict(proc_dict, &db_checkout?/1)
+  end
+
+  defp apply_proc_dict(proc_dict, filter_fun) when is_function(filter_fun, 1) do
+    proc_dict
+    |> Enum.filter(filter_fun)
+    |> Enum.each(fn {key, value} -> Process.put(key, value) end)
+  end
+
+  defp db_checkout?({{Ecto.Adapters.SQL, _repo}, _value}), do: true
+  defp db_checkout?(_entry), do: false
 
   defp next_fun(ctx) do
     %{
@@ -212,7 +270,13 @@ defmodule RecoverableStream do
 
       {:DOWN, ^tref, :process, _task_pid, reason} ->
         apply_timeout(ctx)
-        {[], start_fun(%Context{ctx | attempt: attempt + 1, exit_reasons: [reason | ctx.exit_reasons]})}
+
+        {[],
+         start_fun(%Context{
+           ctx
+           | attempt: attempt + 1,
+             exit_reasons: [reason | ctx.exit_reasons]
+         })}
     end
   end
 
