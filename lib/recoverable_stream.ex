@@ -50,6 +50,10 @@ defmodule RecoverableStream do
       ],
       timeout_fun: [
         type: {:or, [{:fun, 1}, {:fun, 2}]}
+      ],
+      pass_proc_dict: [
+        type: {:or, [{:in, [:missing, :db_checkouts]}, nil, {:fun, 1}]},
+        default: :db_checkouts
       ]
     ]
 
@@ -64,6 +68,7 @@ defmodule RecoverableStream do
       :stream_fun,
       :wrapper_fun,
       :timeout_fun,
+      :pass_proc_dict,
       last_value: nil,
       exit_reasons: []
     ]
@@ -101,7 +106,7 @@ defmodule RecoverableStream do
   `t:wrapper_fun/0` calls this function with the metadata that should be forwarded
   to `t:stream_fun/0`.
   """
-  @type inner_reduce_fun :: (stream_arg_t() -> any())
+  @type inner_reduce_fun :: (stream_arg_t() -> none())
 
   @typedoc """
   A function that wraps execution of the stream reducer inside the worker task.
@@ -131,12 +136,40 @@ defmodule RecoverableStream do
           | (attempt :: pos_integer(), reason :: any() -> retry_timeout_t())
 
   @typedoc """
+  Predicate used by `t:pass_proc_dict/0` to decide which process dictionary
+  entries are copied into the stream-reducer task.
+
+  Receives `{key, value}` and may return any truthy value to copy the entry.
+  """
+  @type pass_proc_dict_filter :: ({any(), any()} -> as_boolean(term()))
+
+  @typedoc """
+  Controls which entries from the caller's process dictionary are copied into
+  the stream-reducer task before `t:wrapper_fun/0` runs.
+
+  Supported values:
+
+  - `:db_checkouts` - copy only Ecto SQL checkout entries whose keys match
+    `{Ecto.Adapters.SQL, _}`.
+  - `:missing` - copy only entries whose keys are not already present in the
+    task process dictionary.
+  - `nil` - disable process dictionary copying.
+  - `t:pass_proc_dict_filter/0` - copy entries selected by a custom filter.
+  """
+  @type pass_proc_dict ::
+          nil
+          | :missing
+          | :db_checkouts
+          | pass_proc_dict_filter()
+
+  @typedoc """
   Options accepted by `run/2`.
   """
   @type run_option ::
           {:max_retries, non_neg_integer()}
           | {:timeout_fun, timeout_fun()}
           | {:wrapper_fun, wrapper_fun()}
+          | {:pass_proc_dict, pass_proc_dict()}
           | {:task_supervisor, atom() | pid()}
 
   @spec run(stream_fun(), [run_option()]) :: Enumerable.t()
@@ -191,6 +224,21 @@ defmodule RecoverableStream do
     values are slept, while non-positive values skip sleeping.
     Defaults to `nil`, i.e. no timeout.
 
+  - `:pass_proc_dict` - controls which entries from the caller's process
+    dictionary are copied into the stream-reducer `Task` before it runs
+    `:wrapper_fun` and queries the source stream.
+
+    Accepts:
+
+    - `:db_checkouts` - copy only DB checkout entries whose keys match
+      `{Ecto.Adapters.SQL, _}` (default to pass Ecto transactions/checkouts).
+    - `:missing` - copy only entries whose keys are not already present in
+      the task process dictionary. This is useful when the process dictionary
+      stores other process-specific settings that must not be overwritten.
+    - `nil` - disable process dictionary copying.
+    - `fun/1` - copy entries for which the function returns a truthy value.
+      The function receives `{key, value}`.
+
   - `:wrapper_fun` -- is a function that wraps a stream reducer running
      inside a `Task` (defaults to `fn f -> f.(%{}) end`).
 
@@ -219,7 +267,8 @@ defmodule RecoverableStream do
       max_retries: opts[:max_retries],
       stream_fun: stream_fun,
       wrapper_fun: opts[:wrapper_fun],
-      timeout_fun: opts[:timeout_fun]
+      timeout_fun: opts[:timeout_fun],
+      pass_proc_dict: opts[:pass_proc_dict]
     }
 
     # TODO: reimplement as proper Enumerable?
@@ -234,9 +283,12 @@ defmodule RecoverableStream do
   defp start_fun(%Context{stream_fun: stream_fun} = ctx) do
     owner = self()
     reply_ref = make_ref()
+    proc_dict = Process.get()
 
     task =
       Task.Supervisor.async_nolink(ctx.supervisor, fn ->
+        apply_proc_dict(proc_dict, ctx.pass_proc_dict)
+
         ctx.wrapper_fun.(fn stream_arg ->
           :erlang.fun_info(stream_fun)[:arity]
           |> case do
@@ -250,6 +302,32 @@ defmodule RecoverableStream do
 
     %Context{ctx | task: task, reply_ref: reply_ref}
   end
+
+  defp apply_proc_dict(_proc_dict, nil), do: :ok
+
+  defp apply_proc_dict(proc_dict, :missing) do
+    missing = make_ref()
+
+    Enum.each(proc_dict, fn {key, value} ->
+      case Process.get(key, missing) do
+        ^missing -> Process.put(key, value)
+        _value -> :ok
+      end
+    end)
+  end
+
+  defp apply_proc_dict(proc_dict, :db_checkouts) do
+    apply_proc_dict(proc_dict, &db_checkout?/1)
+  end
+
+  defp apply_proc_dict(proc_dict, filter_fun) when is_function(filter_fun, 1) do
+    proc_dict
+    |> Enum.filter(filter_fun)
+    |> Enum.each(fn {key, value} -> Process.put(key, value) end)
+  end
+
+  defp db_checkout?({{Ecto.Adapters.SQL, _repo}, _value}), do: true
+  defp db_checkout?(_entry), do: false
 
   defp next_fun(ctx) do
     %{

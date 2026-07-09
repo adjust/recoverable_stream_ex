@@ -2,13 +2,16 @@ name: Elixir CI
 
 on: push
 
+concurrency:
+  group: ci-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ImageOS: ubuntu22
+
 jobs:
   build:
     runs-on: ubuntu-latest
-
-    strategy:
-      matrix:
-       elixir_vsn: ["slim"]
 
     services:
       database:
@@ -18,17 +21,23 @@ jobs:
         ports:
           - 5432:5432
 
-    container:
-      image: elixir:${{matrix.elixir_vsn}}
-      env:
-        PG_HOST: database
-
     steps:
-    - uses: actions/checkout@v1
-    - name: Install Dependencies
-      run: |
-        mix local.rebar --force
-        mix local.hex --force
-        mix deps.get
+    - uses: actions/checkout@v4
+    - name: Set up Elixir
+      uses: adjust/setup-beam@v1.17.5
+      with:
+        version-file: ".tool-versions"
+        version-type: "strict"
+    - name: Restore dependencies cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          deps
+          _build
+        key: ci-${{ env.MIX_ENV }}-${{ runner.os }}-${{ hashFiles('.tool-versions') }}-${{ hashFiles('**/mix.lock') }}
+    - name: Fetch dependencies
+      run: mix deps.get
+    - name: Compile (strict)
+      run: mix compile --warnings-as-errors
     - name: Run Tests
       run: mix test
