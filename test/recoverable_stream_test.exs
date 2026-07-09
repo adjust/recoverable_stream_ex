@@ -21,6 +21,25 @@ defmodule RecoverableStreamTest do
     end
   end
 
+  defp retry_case_factory do
+    one = Enum.count([make_ref()])
+    prefix_length = Enum.count([make_ref(), make_ref(), make_ref()])
+    suffix_length = Enum.count([make_ref(), make_ref()])
+    take_count = prefix_length + suffix_length
+    start_value = System.unique_integer([:positive])
+
+    %{
+      crash_message: inspect(make_ref()),
+      failure_value: start_value + prefix_length - one,
+      expected_values: Enum.to_list(start_value..(start_value + take_count - one)),
+      max_retries: one,
+      retry_attempt: one,
+      start_value: start_value,
+      take_count: take_count,
+      timeout: Enum.count([])
+    }
+  end
+
   test "normal wrapped stream" do
     n = 9
     res = gen_stream_f() |> RS.run() |> Stream.take(n)
@@ -122,6 +141,46 @@ defmodule RecoverableStreamTest do
       |> Enum.take(n)
 
     assert Enum.to_list(1..n) == res
+  end
+
+  test "timeout_fun receives retry attempt and exit reason" do
+    %{
+      crash_message: crash_message,
+      expected_values: expected_values,
+      failure_value: failure_value,
+      max_retries: max_retries,
+      retry_attempt: retry_attempt,
+      start_value: start_value,
+      take_count: take_count,
+      timeout: timeout
+    } = retry_case_factory()
+
+    pid = self()
+    ref = make_ref()
+
+    stream_fun = fn
+      nil ->
+        Stream.iterate(start_value, fn
+          value when value < failure_value -> value + 1
+          _ -> raise crash_message
+        end)
+
+      last_value ->
+        Stream.iterate(last_value + 1, &(&1 + 1))
+    end
+
+    timeout_fun = fn attempt, reason ->
+      send(pid, {ref, attempt, reason})
+      timeout
+    end
+
+    res =
+      RS.run(stream_fun, timeout_fun: timeout_fun, max_retries: max_retries)
+      |> Enum.take(take_count)
+
+    assert expected_values == res
+
+    assert_receive {^ref, ^retry_attempt, {%RuntimeError{message: ^crash_message}, _stacktrace}}
   end
 
   describe "pass_proc_dict option" do
